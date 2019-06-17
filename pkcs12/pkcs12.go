@@ -2,13 +2,17 @@
 // public certificates that can be used in both TLS services. The official PKCS12 library
 // is not the friendliest when you have more than 1 public key for the purpose of checking
 // the certificates signing by intermediates and the root CA. This uses a vendored
-// version of the golang.org/x/crypto/pkcs12 package that cannot accurately decode a
-// Microsoft pkcs12 due to unsupported OIDS, some of which do not have any documentation
+// version of the golang.org/x/crypto/pkcs12 package, as the original cannot accurately decode a
+// Microsoft pkcs12 due to unsupported OIDs, some of which do not have any documentation
 // I can find. These changes are actually based on https://go-review.googlesource.com/c/crypto/+/166520
 // that has been pending for a review and not the current checked in code.
 //
+// Usage Note: skipVerify == true makes the assumtion that the first public cert found is the site
+// certificate. While that seems to be the defacto standard, I did not find a reference that says
+// this is always the case.
+//
 // Note: I haven't tried to push these OID changes up into the repo. I am not an expert on TLS and
-// some of these OIDS are mysterious in nature. I ignore these attributes as they aren't necessary
+// some of these OIDs are mysterious in nature. I ignore these attributes as they aren't necessary
 // for Go's purpose of serving content or validating certificate signatures. Some are related to
 // OSCP and allowed usages. I do not understand these enough to implement (I can see these have
 // entries in x509.Certificate struct). Some of the Microsoft ones don't have any documentation
@@ -16,11 +20,8 @@
 //
 // Note2: There aren't tests here. I've only tested this with certificates I cannot store here
 // and I will need to duplicate this with some throw away certs or bring up a CA in my test code
-// to do the generation. This is more involved than I can deal with right now.
-//
-// Note3: I know this is disclosed in the license, but use at your own risk. I don't have test code
-// and while I've tested that most of this works for my purposes (extract key cert file in PEM form
-// and store in a vault for TLS use), milleage may vary. I ain't Brad Fitzpatrick.
+// to do the generation. This is more involved than I can deal with right now. Your mileage may
+// vary, as I ain't Brad Fitzpatrick.
 package pkcs12
 
 import (
@@ -45,6 +46,7 @@ func extraction(pkcs12Bytes []byte, password string, skipVerify bool) (*pem.Bloc
 	if err == nil {
 		pkcs12Bytes = p12
 	}
+
 	blocks, err := pkcs12.ToPEM(pkcs12Bytes, password)
 	if err != nil {
 		return nil, nil, err
@@ -60,22 +62,37 @@ func extraction(pkcs12Bytes []byte, password string, skipVerify bool) (*pem.Bloc
 		if err != nil {
 			return nil, nil, fmt.Errorf("block %d did not appear to be a x509 certificate", i)
 		}
-		if !skipVerify {
-			_, err = cert.Verify(x509.VerifyOptions{})
-			if err != nil {
-				return nil, nil, err
-			}
-		}
 		certs = append(certs, cert)
 	}
 
+	if len(certs) == 0 {
+		return nil, nil, fmt.Errorf("no public certs were found")
+	}
+
+	if !skipVerify {
+		intermediates := x509.NewCertPool()
+		roots := x509.NewCertPool()
+
+		switch len(certs) {
+		case 1:
+			// Do nothing
+		default:
+			for _, cert := range certs[1:] {
+				if cert.BasicConstraintsValid && cert.IsCA {
+					roots.AddCert(cert)
+				} else {
+					intermediates.AddCert(cert)
+				}
+			}
+		}
+
+		opts := x509.VerifyOptions{Roots: roots, Intermediates: intermediates}
+		if _, err := certs[0].Verify(opts); err != nil {
+			return nil, nil, fmt.Errorf("certificate chain did not verify: %s", err)
+		}
+	}
+
 	return &pem.Block{Type: "PRIVATE KEY", Bytes: blocks[0].Bytes}, certs, nil
-}
-
-func verify(cert *x509.Certificate) error {
-	_, err := cert.Verify(x509.VerifyOptions{})
-	return err
-
 }
 
 // parsePrivateKey is lifted from somewhere in the standard library.
@@ -100,7 +117,7 @@ func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
 }
 
 // FromFile opens a PKCS12 file at filePath with password and returns the PrivateKey, public certificates
-// and a ready made tls.Certificate
+// and a ready made tls.Certificate.
 func FromFile(filePath string, password string, skipVerify bool) (crypto.PrivateKey, []*x509.Certificate, tls.Certificate, error) {
 	b, err := ioutil.ReadFile(filePath)
 	if err != nil {
