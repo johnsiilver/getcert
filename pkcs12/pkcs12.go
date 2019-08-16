@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 
 	"golang.org/x/crypto/pkcs12"
@@ -70,6 +71,15 @@ func extraction(pkcs12Bytes []byte, password string, skipVerify bool) (*pem.Bloc
 	}
 
 	if !skipVerify {
+		if err := verifyChain(certs); err != nil {
+			log.Println("certificate chain did not verify in original order, trying reverse")
+			certs = reverseCerts(certs)
+			if rerr := verifyChain(certs); rerr != nil {
+				log.Println("certificate chain did not verify in reverse order either, returning original error")
+				return nil, nil, fmt.Errorf("certificate chain did not verify: %s", err)
+			}
+		}
+
 		intermediates := x509.NewCertPool()
 		roots := x509.NewCertPool()
 
@@ -93,6 +103,44 @@ func extraction(pkcs12Bytes []byte, password string, skipVerify bool) (*pem.Bloc
 	}
 
 	return &pem.Block{Type: "PRIVATE KEY", Bytes: blocks[0].Bytes}, certs, nil
+}
+
+// verifyChain takes in the chain of public certificates and validates the.
+// This assumes the order of site cert, intermediate certs, root certs.
+func verifyChain(certs []*x509.Certificate) error {
+	intermediates := x509.NewCertPool()
+	roots := x509.NewCertPool()
+
+	switch len(certs) {
+	case 1:
+		// Do nothing
+	default:
+		for _, cert := range certs[1:] {
+			if cert.BasicConstraintsValid && cert.IsCA {
+				roots.AddCert(cert)
+			} else {
+				intermediates.AddCert(cert)
+			}
+		}
+	}
+
+	opts := x509.VerifyOptions{Roots: roots, Intermediates: intermediates}
+	if _, err := certs[0].Verify(opts); err != nil {
+		return fmt.Errorf("certificate chain did not verify: %s", err)
+	}
+	return nil
+}
+
+func reverseCerts(certs []*x509.Certificate) []*x509.Certificate {
+	if len(certs) == 0 || len(certs) == 1 {
+		return certs
+	}
+
+	n := make([]*x509.Certificate, len(certs))
+	for i, v := range certs {
+		n[len(n)-i-1] = v
+	}
+	return n
 }
 
 // parsePrivateKey is lifted from somewhere in the standard library.
@@ -171,6 +219,9 @@ func WriteFromFileToPEM(pkcs12Path string, password string, skipVerify bool, key
 	defer certFile.Close()
 
 	keyBlock, certs, err := extraction(b, password, skipVerify)
+	if err != nil {
+		return fmt.Errorf("problem extracting from PKCS12 archive: %s", err)
+	}
 
 	if err := pem.Encode(keyFile, keyBlock); err != nil {
 		return fmt.Errorf("could not PEM encode the private key block: %s", err)
