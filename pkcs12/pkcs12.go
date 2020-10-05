@@ -164,15 +164,10 @@ func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
 	return nil, errors.New("tls: failed to parse private key")
 }
 
-// FromFile opens a PKCS12 file at filePath with password and returns the PrivateKey, public certificates
-// and a ready made tls.Certificate.
-func FromFile(filePath string, password string, skipVerify bool) (crypto.PrivateKey, []*x509.Certificate, tls.Certificate, error) {
-	b, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		return nil, nil, tls.Certificate{}, fmt.Errorf("could not oopen file %s: %s", filePath, err)
-	}
-
-	keyBlock, certs, err := extraction(b, password, skipVerify)
+// FromBytes opens a PKCS12 file represented by pkcsData with password and returnes the PrivateKey, public certificates and
+// a ready made tls.Certificate.
+func FromBytes(pkcsData []byte, password string, skipVerify bool) (crypto.PrivateKey, []*x509.Certificate, tls.Certificate, error) {
+	keyBlock, certs, err := extraction(pkcsData, password, skipVerify)
 	if err != nil {
 		return nil, nil, tls.Certificate{}, err
 	}
@@ -193,6 +188,17 @@ func FromFile(filePath string, password string, skipVerify bool) (crypto.Private
 	}
 
 	return privKey, certs, tlsCert, nil
+}
+
+// FromFile opens a PKCS12 file at filePath with password and returns the PrivateKey, public certificates
+// and a ready made tls.Certificate.
+func FromFile(filePath string, password string, skipVerify bool) (crypto.PrivateKey, []*x509.Certificate, tls.Certificate, error) {
+	b, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return nil, nil, tls.Certificate{}, fmt.Errorf("could not oopen file %s: %s", filePath, err)
+	}
+
+	return FromBytes(b, password, skipVerify)
 }
 
 // WriteFromFileToPEM writes PEM encoded key and certificate from a PCKS12 file. The certificates are
